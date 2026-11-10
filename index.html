@@ -265,7 +265,7 @@ body.viewing #viewer .lp{min-height:100vh;background-attachment:fixed}
     <details class="acc" data-sec="basic"><summary><h2>基本情報</h2><span class="sm" id="sm-basic"></span></summary><div class="acc-body">
       <p class="warn" id="sampleNote" hidden style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span style="flex:1">いま入っているのは見本の店（atelier kinari）です。</span><button class="btn" id="clearSample" style="border-color:#d23c2a;color:#9b2415">見本を消して自分の店にする</button></p>
 <label class="f"><span id="brandLabel">屋号</span><input class="in" id="brand"></label>
-      <label class="f" id="rowBio">一言（紹介文）<textarea class="in" id="bio" rows="2"></textarea></label>
+      <label class="f" id="rowBio">一言（紹介文）<textarea class="in" id="bio" rows="3"></textarea><small class="hint" style="margin:2px 0 0">改行を入れると、その位置で区切ります。入れなければ、言葉の切れ目で自動で折り返します。<b id="bioGuideTxt"></b></small></label>
       <label class="f" id="rowSns">SNS・連絡先（看板に小さく入ります）<input class="in" id="sns"></label>
     </div></details>
 
@@ -429,6 +429,7 @@ body.viewing #viewer .lp{min-height:100vh;background-attachment:fixed}
 <main>
   <div class="panel" id="paperPanel">
     <div class="panel-h"><b id="paperPanelTitle">電子ペーパー（PaperDIY 4.7インチ）</b><span id="paperInfo"></span></div>
+    <p class="warn" id="paperWarn" hidden style="margin:0 0 12px"></p>
     <div id="paperList"></div>
     <p class="hint" style="max-width:640px;text-align:center">表示イメージです。実機は紙のような白さで、直射日光の下でもはっきり読めます。画面を切り替えるときは一度白黒に点滅してから描き変わります（残像を消すため）。</p>
   </div>
@@ -1507,44 +1508,98 @@ function paperTheme() {
 }
 
 /* ---- text helpers (Japanese-friendly wrap, fit, vertical) ---- */
-function pWrap(x, text, maxW) {
+/* 日本語の折り返し：単語（Intl.Segmenter）の切れ目で折る。助詞・送りがなは前の語に、句読点・小さい字は行頭に来ないように */
+const JSEG = (() => { try { return new Intl.Segmenter('ja', { granularity: 'word' }); } catch (e) { return null; } })();
+const NO_HEAD = '、。，．,.）)」』】〕〉》］]｝}！？!?:：;；ー－…‥・ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮヵヶ々ゝゞ〜～%％';
+const NO_TAIL = '（(「『【〔〈《［[｛{¥￥＄$#＃@＠';
+function pTokens(para) {
+  const segs = JSEG ? Array.from(JSEG.segment(para), g => g.segment) : (para.match(/[\x21-\x7e]+|\s+|./gu) || []);
   const out = [];
-  for (const para of String(text || '').split('\n')) {
-    let line = '';
-    for (const ch of Array.from(para)) {
-      const t = line + ch;
-      if (line && x.measureText(t).width > maxW) {
-        if ('、。，．）」』！？ー…・'.includes(ch)) { line = t; continue; }   // 行頭禁則：ぶら下げ
-        const sp = line.lastIndexOf(' ');
-        const run = /[\x21-\x7e]/.test(ch) ? line.match(/[\x21-\x7e]+$/) : null;   // 英数字のかたまり（10:00、@sns など）の途中では切らない
-        if (/[A-Za-z0-9]/.test(ch) && sp > 0 && (!run || sp >= run.index - 1)) { out.push(line.slice(0, sp)); line = line.slice(sp + 1) + ch; }
-        else if (run && run.index > 0) { out.push(line.slice(0, run.index)); line = run[0] + ch; }
-        else { out.push(line); line = ch === ' ' ? '' : ch; }
-      } else line = t;
-    }
-    out.push(line);
+  for (const g of segs) {
+    const i = out.length - 1, prev = out[i];
+    if (prev === undefined || /^\s+$/.test(g) || /\s$/.test(prev)) { out.push(g); continue; }
+    const last = prev[prev.length - 1];
+    if (/^[\x21-\x7e]+$/.test(g) && /[\x21-\x7e]$/.test(prev)) out[i] += g;            // hexa-stage.com、10:00、@sns はひとかたまり
+    else if (NO_HEAD.includes(g[0]) || NO_TAIL.includes(last)) out[i] += g;              // 行頭禁則・行末禁則
+    else if (/^[ぁ-ゟ]+$/.test(g) && !/[ぁ-ゟ]$/.test(prev) && !NO_HEAD.includes(last) && Array.from(prev).length + Array.from(g).length <= 14) out[i] += g;   // 「活用した」「プリンタによる」：ひらがなは前の語につける
+    else if (/^[ぁ-ゟ]+$/.test(g) && /^[ぁ-ゟ]+$/.test(prev) && Array.from(prev).length + Array.from(g).length <= 5) out[i] += g;   // ひらがなだけの文（わすれもの・かくにん）は細かく割れるので、短いまとまりに
+    else if (/^\p{Script=Han}$/u.test(prev) && /^\p{Script=Han}/u.test(g) && Array.from(g).length <= 3) out[i] += g;   // 「光｜造形」→「光造形」
+    else out.push(g);
   }
   return out;
 }
+function pWrapChars(x, word, maxW, out) {   // 1語だけで幅を超えるとき：文字で折る（行頭禁則はぶら下げ）
+  let line = '';
+  for (const ch of Array.from(word)) {
+    const t = line + ch;
+    if (line && x.measureText(t).width > maxW && !NO_HEAD.includes(ch)) { out.push(line); line = ch; } else line = t;
+  }
+  return line;
+}
+function pWrap(x, text, maxW) {
+  const out = [];
+  for (const para of String(text || '').split('\n')) {   // 自分で入れた改行は必ずそこで区切る
+    let line = '';
+    for (const tk of pTokens(para)) {
+      if (/^\s+$/.test(tk)) { if (line) line += tk; continue; }
+      const t = line + tk;
+      if (x.measureText(t.trimEnd()).width <= maxW) { line = t; continue; }
+      if (line.trim()) out.push(line.trimEnd());
+      line = x.measureText(tk).width > maxW ? pWrapChars(x, tk, maxW, out) : tk;
+    }
+    out.push(line.trimEnd());
+  }
+  return out;
+}
+/* 行数を変えずに幅を狭めて、行の長さをそろえる（最後の行だけ1語、を防ぐ） */
+function pBalance(x, text, maxW, lines) {
+  if (lines.length < 2) return lines;
+  let lo = maxW * 0.45, hi = maxW, best = lines;
+  for (let i = 0; i < 9; i++) {
+    const mid = (lo + hi) / 2, l = pWrap(x, text, mid);
+    if (l.length === lines.length && l.every(v => x.measureText(v).width <= maxW)) { best = l; hi = mid; } else lo = mid;
+  }
+  return best;
+}
+let PAPER_WARN = [], PAPER_PAGE = '', BIO_GUIDE = null;
+/* 紹介文の目安：いちばん小さい文字で、1行に全角何文字・何行まで入るか */
+function bioGuide(x, maxW, maxH, k, lim) {
+  const s = isEz() ? 30 : 20; x.font = pfRaw(400, s);
+  BIO_GUIDE = { cols: Math.max(1, Math.floor(maxW / x.measureText('あ').width)), rows: Math.max(1, Math.min(lim, Math.floor(maxH / (s * k)))) };
+}
 function pFit(x, text, maxW, maxH, maxPx, minPx, wt, maxLines, lhK) {   // 行数が少ないほうを優先（1文字だけの行を作らない）
   const k = lhK || 1.3, lim = maxLines || 99, rk = roleK(maxPx);   // 文字の大きさの倍率（入りきらなければ縮める）
-  maxPx = Math.round(maxPx * rk); minPx = Math.max(10, Math.round(minPx * Math.min(1, rk))); maxH *= Math.max(1, rk);
-  const tryL = L => {
-    for (let s = maxPx; s >= minPx; s -= 2) {
-      x.font = pfRaw(wt, s); const lines = pWrap(x, text, maxW);
-      if (lines.length <= L && lines.length * s * k <= maxH && lines.every(l => x.measureText(l).width <= maxW * 1.04)) return { s, lines, lh: s * k, h: lines.length * s * k };
-    }
+  const lo = isEz() ? 30 : 10;   // pfRaw は EZ Sign で30px未満を30pxに底上げする：測る大きさもそろえる（でないと実際の字が大きくなってはみ出す）
+  maxPx = Math.max(lo, Math.round(maxPx * rk)); minPx = Math.max(lo, Math.round(minPx * Math.min(1, rk))); maxH *= Math.max(1, rk);
+  const fits = (lines, s, L) => lines.length <= L && lines.length * s * k <= maxH && lines.every(l => x.measureText(l).width <= maxW * 1.02);
+  const done = (s, lines) => { x.font = pfRaw(wt, s); lines = pBalance(x, text, maxW, lines); return { s, lines, lh: s * k, h: lines.length * s * k }; };
+  const tryL = (L, hiPx, loPx) => {
+    for (let s = hiPx; s >= loPx; s -= 2) { x.font = pfRaw(wt, s); const lines = pWrap(x, text, maxW); if (fits(lines, s, L)) return { s, lines }; }
     return null;
   };
+  const hard = String(text || '').split('\n').length;   // 自分で入れた改行の行数は必ず確保する
   let best = null;
-  for (let L = 1; L <= Math.min(lim, 12); L++) {
-    const r = tryL(L); if (!r) continue;
+  for (let L = Math.max(1, Math.min(hard, lim)); L <= Math.min(lim, 12); L++) {
+    const r = tryL(L, maxPx, minPx); if (!r) continue;
     if (!best || r.s > best.s) best = r;
     if (r.s >= maxPx * 0.62 || r.s >= minPx + 14) break;
   }
-  if (best) return best;
-  x.font = pfRaw(wt, minPx); const lines = pWrap(x, text, maxW).slice(0, lim);
-  return { s: minPx, lines, lh: minPx * k, h: lines.length * minPx * k };
+  if (best) return done(best.s, best.lines);
+  /* 入りきらない：行数の上限をゆるめ、もう少し小さくしても全文を出す */
+  const floor = Math.max(lo, 14, Math.round(minPx * 0.75));
+  const r = tryL(Math.max(lim, hard) + 2, Math.max(floor, minPx - 2), floor);
+  if (r) { if (PAPER_PAGE) PAPER_WARN.push(`${PAPER_PAGE}：文字が多いので、小さめ・行を増やして全部入れました`); return done(r.s, r.lines); }
+  /* それでも入らない：入る行まで出して「…」。どの画面かを知らせる */
+  x.font = pfRaw(wt, floor);
+  let lines = pWrap(x, text, maxW);
+  const L = Math.max(1, Math.min(lines.length, Math.floor(maxH / (floor * k)) || 1));
+  if (lines.length > L) {
+    lines = lines.slice(0, L); let last = lines[L - 1] + '…';
+    while (Array.from(last).length > 1 && x.measureText(last).width > maxW) last = Array.from(last).slice(0, -2).join('') + '…';
+    lines[L - 1] = last;
+    if (PAPER_PAGE) PAPER_WARN.push(`${PAPER_PAGE}：「${Array.from(String(text)).slice(0, 8).join('')}…」が入りきりません`);
+  }
+  return { s: floor, lines, lh: floor * k, h: lines.length * floor * k };
 }
 function pDraw(x, fit, cx, top, wt, align) {
   x.font = pfRaw(wt, fit.s); x.textAlign = align || 'center'; x.textBaseline = 'middle';
@@ -1685,7 +1740,10 @@ function pSign(c, T, P, ctx) {
   if (land) {
     const colW = q ? W * (isEz() ? 0.53 : 0.56) : W - M * 2, cx = M + colW / 2;
     let y;
-    const fb = pFit(x, brand, colW - 20, 170, 84, 34, wt, 2, 1.2), fbio = pFit(x, bio, colW - 20, 120, 34, 20, 400, 3, 1.5);
+    const fb = pFit(x, brand, colW - 20, 170, 84, 34, wt, 2, 1.2);
+    const bioH = Math.max(90, H - M * 2 - 30 - fb.h - 34 - (sns ? 50 : 0) - (logo ? Math.round(60 * LK) : 0));   // 屋号の残りの高さを紹介文に
+    const fbio = pFit(x, bio, colW - 20, bioH, 34, 20, 400, 5, 1.45);
+    bioGuide(x, colW - 20, bioH, 1.45, 5);
     const ls = Math.min(Math.round(120 * LK), H - M * 2 - fb.h - 30), tot = (logo ? ls + 20 : 0) + fb.h + (bio ? fbio.h + 34 : 0) + (sns ? 50 : 0);
     y = Math.max(M + 10, (H - tot) / 2);
     if (logo) { pImg(c, logo, cx - ls / 2, y, ls, ls, T.inv); y += ls + 20; }
@@ -1712,6 +1770,7 @@ function pSign(c, T, P, ctx) {
   } else {
     let y = M + 26;
     const fb = pFit(x, brand, W - M * 2 - 20, 210, 92, 36, wt, 2, 1.18), fbio = pFit(x, bio, W - M * 2 - 30, 170, 34, 20, 400, 4, 1.55);
+    bioGuide(x, W - M * 2 - 30, 170, 1.55, 4);
     const ls = Math.min(Math.round(180 * LK), W - M * 2), tot = (logo ? ls + 20 : 0) + fb.h + (bio ? fbio.h + 46 : 0);
     y = M + 10 + Math.max(0, (bottom - M - 10 - tot) / 2);
     if (logo) { pImg(c, logo, W / 2 - ls / 2, y, ls, ls, T.inv); y += ls + 20; }
@@ -1928,22 +1987,25 @@ async function paperBuild() {
   T.logoPx = Math.round(Math.min(W, H) * (+S.paperLogoSize || 12) / 100);
   T.top = T.M + (logo && S.paperLogoPos === 'top' ? T.logoPx + 12 : 0); T.hasLogo = !!logo && !isLogoFree();
   const ctx = { qr: CUR.qr, logo, qlogo }, out = [];
+  PAPER_WARN = []; BIO_GUIDE = null;
   let n = 0;
   const mk = () => { RSEED = 7; const c = document.createElement('canvas'); c.width = W; c.height = H; c._dither = []; return c; };
   for (const P of on) {
     if (P.type === 'menu') {
       const rows = menuRows(); if (!rows.length) continue;
       const per = menuLayout(W, H, T).per, pages = Math.ceil(rows.length / per);
+      PAPER_PAGE = PAPER_TYPES.menu.label;
       for (let k = 0; k < pages; k++) { const c = mk(); pMenu(c, T, P, ctx, rows.slice(k * per, k * per + per), k + 1, pages); pLogoMark(c, T, logo); out.push({ c, type: P.type, label: PAPER_TYPES[P.type].label + (pages > 1 ? ` ${k + 1}` : ''), name: `${String(++n).padStart(2, '0')}_menu${pages > 1 ? '-' + (k + 1) : ''}.png` }); }
       continue;
     }
-    const c = mk();
+    const c = mk(); PAPER_PAGE = PAPER_TYPES[P.type].label;
     if (P.type === 'photo') { pPhoto(c, T, P, await paperImg(P.img)); out.push({ c, type: P.type, label: PAPER_TYPES.photo.label, name: `${String(++n).padStart(2, '0')}_photo.png` }); continue; }
     if (P.type === 'hand') { pHand(c, T, { _ink: await paperImg(P.img), _bg: await paperImg(P.bgimg) }); out.push({ c, type: P.type, label: PAPER_TYPES.hand.label, name: `${String(++n).padStart(2, '0')}_hand.png` }); continue; }
     ({ sign: pSign, qr: pQRPage, open: pStatus, brk: pStatus, soldout: pStatus, pay: pPay, next: pNext, free: pFree })[P.type](c, T, P, ctx);
     if (P.type !== 'sign' || isLogoFree()) pLogoMark(c, T, logo);
     out.push({ c, type: P.type, label: PAPER_TYPES[P.type].label, name: `${String(++n).padStart(2, '0')}_${P.type}.png` });
   }
+  PAPER_PAGE = '';
   const k = paperScale();
   if (k !== 1) out.forEach(o => {   // 2倍で描いたものを、端末の解像度に縮める
     const [ow, oh] = paperOutDims(), s2 = document.createElement('canvas'); s2.width = ow; s2.height = oh;
@@ -1973,12 +2035,18 @@ async function renderPaper() {
   const stageWrap = img => `<div class="epd-dev ez stage${land ? ' land' : ''}" style="${fbg}padding:${px(frm[1])} ${px(frm[0])} 0"><div class="bz" style="padding:${px(bzm[1])} ${px(bzm[0])} ${px(bzm[2])}">${img}</div><div class="stg-plate" style="width:${px(72)};height:${px(8)};margin:${px(3)} 0 ${px(3)}">${esc(clean(S.brand) || 'HEXA STAGE')}</div><div class="stg-tray"${scol ? ` style="background:${mixHex(scol.hex, '#000000', 0.08)};border-color:${mixHex(scol.hex, '#000000', 0.18)}"` : ''}></div></div>`;
   $('paperList').innerHTML = list.length ? list.map((o, i) => `<figure class="epd">${stage ? stageWrap(`<img src="${o.c.toDataURL('image/png')}" alt="${esc(o.label)}">`) : `<div class="epd-dev${land ? ' land' : ''}${ez ? ' ez' : ''}"><img src="${o.c.toDataURL('image/png')}" alt="${esc(o.label)}"></div>`}<figcaption><b>${String(i + 1).padStart(2, '0')}</b>${esc(o.label)}<button class="txtbtn" data-ppng="${i}">PNG</button>${canShareFiles ? `<button class="txtbtn" data-pshare="${i}">写真に保存</button>` : ''}</figcaption></figure>`).join('')
     : '<p class="hint" style="padding:30px 0">左の「電子ペーパーの画面」で、表示する画面にチェックを入れてください。</p>';
+  $('bioGuideTxt').textContent = BIO_GUIDE ? `いまの書体・向きでは、看板の紹介文は1行 全角${BIO_GUIDE.cols}文字くらい・${BIO_GUIDE.rows}行までが目安です。` : '';
+  const warns = [...new Set(PAPER_WARN)];
+  $('paperWarn').hidden = !warns.length;
+  $('paperWarn').innerHTML = warns.length ? warns.map(esc).join('<br>') + '<br><small>文字を減らすか、区切りたい所で改行してください。書体によって入る文字数が変わります。</small>' : '';
   $('paperInfo').textContent = `${paperDev().label}・${list.length}画面・${land ? '横' : '縦'} ${ow}×${oh}・${ez ? paperPal().label : '16階調'}`;
   /* スマホ用：画面上部に1枚目を小さく出しておく（入力しながら結果が見える） */
   $('mini').hidden = !list.length;
   if (list.length) { $('miniImg').src = list[0].c.toDataURL('image/png'); $('miniTitle').textContent = clean(S.brand) || '（屋号が空です）'; $('miniSub').textContent = `${list[0].label}・全${list.length}画面・${paperDev().label}`; }
 }
 function schedulePaper() { clearTimeout(schedulePaper.t); schedulePaper.t = setTimeout(renderPaper, 180); }
+/* 書体の読み込みが遅れたとき（2.5秒で先に描いたとき）：読み込めたら描き直す。測った書体と描く書体がずれて、はみ出すのを防ぐ */
+try { document.fonts.addEventListener('loadingdone', () => { if (isPaper()) schedulePaper(); }); } catch (e) {}
 
 /* ---- ZIP (store) ---- */
 const CRC_T = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
